@@ -10,13 +10,19 @@ using Flux
 # ╔═╡ c70eaa72-90ad-11eb-3600-016807d53697
 using StatsFuns: log1pexp #log(1 + exp(x))
 
+# ╔═╡ 76f893fe-928b-11eb-0034-8586ba4e1918
+using BSON: @save, @load # To save model
+
+# ╔═╡ 0a761dc4-90bb-11eb-1f6c-fba559ed5f66
+using Plots ##
+
 # ╔═╡ 9e368304-8c16-11eb-0417-c3792a4cd8ce
 md"""
 # Assignment 3: Variational Autoencoders
 
-- Student Name:
-- Student #:
-- Collaborators:
+- Student Name: Tianyi Liu
+- Student #: 1005820827
+- Collaborators: Lazar Atanackovic, Phil Fradkin
 
 ## Background
 
@@ -116,7 +122,16 @@ We can exploit further numerical stability, e.g. in computing $\log(1 + exp(x))$
 # ╔═╡ e12a5b5e-90ad-11eb-25a8-43c9aff1e0db
 # Numerically stable bernoulli density, why do we do this?
 function bernoulli_log_density(x, logit_means)
-  """Numerically stable log_likelihood under bernoulli by accepting μ/(1-μ)"""
+  	"""Numerically stable log_likelihood under bernoulli by accepting μ/(1-μ)"""
+	"""	
+		in: x, logit_means: dim × batch_size
+		out: dim × batch_size 
+	"""
+	# Naive
+	# return x .* logit_means - log1pexp.(logit_means)
+	# Stable
+	b = x .* 2 .- 1 # [0,1] -> [-1,1]
+  	return - log1pexp.(-b .* logit_means)
 end
 
 # ╔═╡ 3b07d20a-8e88-11eb-1956-ddbaaf178cb3
@@ -131,23 +146,33 @@ md"""
 Note that these functions should accept a batch of digits and representations, an array with elements concatenated along the last dimension.
 """
 
+# ╔═╡ ec53e34c-9139-11eb-2cef-eb640a77b9b4
+function fully_factorizerd_gaussian(z, μ, logσ)
+	σ = exp.(logσ)
+	return sum(log.(1 ./ (2 * π * σ .^ 2) .^ 0.5) .+ (-0.5 * ((z .- μ) ./ σ) .^ 2),
+dims=1) # 1 × BS
+end
+
 # ╔═╡ ce50c994-90af-11eb-3fc1-a3eea9cda1a2
-log_prior(z)
+log_prior(z) =  fully_factorizerd_gaussian(z, 0, 0)
 
 # ╔═╡ 3b386e56-90ac-11eb-31c2-29ba365a6967
 Dz, Dh, Ddata = 2, 500, 28^2
 
 # ╔═╡ d7415d20-90af-11eb-266b-b3ea86750c98
-decoder # You can use Flux's Chain and Dense here
+# You can use Flux's Chain and Dense here
+decoder = Chain(Dense(Dz, Dh, tanh), Dense(Dh, Ddata))
 
 # ╔═╡ 5b8721dc-8ea3-11eb-3ace-0b13c00ce256
 function log_likelihood(x,z)
-  """ Compute log likelihood log_p(x|z)"""
+	""" Compute log likelihood log_p(x|z)"""
 	# use numerically stable bernoulli
+	logit_means = decoder(z)
+	return sum(bernoulli_log_density(x, logit_means), dims=1) # 1 × BS
 end
 
 # ╔═╡ 0afbe054-90b0-11eb-0233-6faede537bc4
-joint_log_density(x,z)
+joint_log_density(x,z) = log_likelihood(x,z) + log_prior(z) # 1 × BS
 
 # ╔═╡ b8a20c8c-8ea4-11eb-0d48-a37047ab70c5
 md"""
@@ -182,21 +207,34 @@ The loss, in this case, no longer being the data likelihood, but the Evidence Lo
 """
 
 # ╔═╡ 615e59c6-90b6-11eb-2598-d32538e14e8f
-log_q(z, q_μ, q_logσ)
+log_q(z, q_μ, q_logσ) = fully_factorizerd_gaussian(z, q_μ, q_logσ) # 1 × BS
+
+# ╔═╡ 1859c670-9133-11eb-275b-cfdb9b3affae
+encoder = Chain(Dense(Ddata, Dh, tanh), Dense(Dh, 2*Dz))
+
+# ╔═╡ 3eda2d1a-9202-11eb-2909-23a577d74f6f
+function wrap_to_gaussian_par(out)
+	return out[1:Dz, :], out[Dz+1:2*Dz, :]
+end
 
 # ╔═╡ ccf226b8-90b6-11eb-15a2-d30c9e27aebb
 function elbo(x)
-  q_μ, q_logσ#TODO variational parameters from data
-  z #TODO: sample from variational distribution
-  joint_ll #TODO: joint likelihood of z and x under model
-  log_q_z #TODO: likelihood of z under variational distribution
-  elbo_estimate  #TODO: Scalar value, mean variational evidence lower bound over batch
-  return elbo_estimate
+  	#TODO variational parameters from data
+	q_μ, q_logσ = wrap_to_gaussian_par(encoder(x))
+  	#TODO: sample from variational distribution
+	z = q_μ .+ exp.(q_logσ) .* randn(size(q_μ))
+	#TODO: joint likelihood of z and x under model
+  	joint_ll = joint_log_density(x, z)
+	#TODO: likelihood of z under variational distribution
+  	log_q_z = log_q(z, q_μ, q_logσ)
+	#TODO: Scalar value, mean variational evidence lower bound over batch
+  	elbo_estimate = sum(joint_ll - log_q_z) / size(x)[2] # scalar
+  	return elbo_estimate
 end
 
 # ╔═╡ f00b5444-90b6-11eb-1e0d-5d034735ec0e
 function loss(x)
-  return -elbo(x)
+  	return -elbo(x)
 end
 
 # ╔═╡ 70ccd9a4-90b7-11eb-1fb2-3f7aff4073a0
@@ -213,24 +251,54 @@ Use the training data to learn the model and variational networks.
 """
 
 # ╔═╡ 5efb0baa-90b8-11eb-304f-7dbb8d5c0ba6
-function train!(enc, dec, data; nepochs=100)
+function train!(enc, dec, data; nepochs=100, force_retrain=false)
 	params = Flux.params(enc, dec)
 	opt = ADAM()
+	losses_train = []
 	
-	for epoch in 1:nepochs
-		for batch in data
-			# compute gradient wrt loss
-			# update parameters
+	if isfile("params.bson") & (~force_retrain)
+		@info "Loading pre-trained weights from params.bson\n"
+		Core.eval(Main, :(import Zygote))
+		@load "params.bson" params
+		Flux.loadparams!((encoder, decoder), params)
+	else
+		@info "Training model from scratch\n"
+		steps = length(data)
+		tic_base = time()
+		for epoch in 1:nepochs
+			# CHANGE FOR LOGGING!
+			# for batch in data
+			for (step, batch) in enumerate(data)
+				tic = time()
+
+				loss_train = loss(batch)
+				push!(losses_train, loss_train)
+				# compute gradient wrt loss
+				dparams = Flux.gradient(() -> loss(batch), params)
+				# update parameters
+				Flux.Optimise.update!(opt, params, dparams)
+
+				toc = time()
+				eta = convert(Int, round((toc - tic_base) / ((epoch - 1) * steps +
+	step) * ((nepochs - epoch) * steps + steps - step), digits=0))
+				@info "iter: $epoch / $nepochs\tstep: $step / $steps\tloss:$loss_train\ttime: $(round(toc - tic, digits=4)) s ETA: $eta s\n"
+
+			end
+			# Optional: log loss using @info "Epoch $epoch: loss:..."
+			# Optional: visualize training progress with plot of loss
+			# Optional: save trained parameters to avoid retraining later
 		end
-		# Optional: log loss using @info "Epoch $epoch: loss:..."
-		# Optional: visualize training progress with plot of loss
-		# Optional: save trained parameters to avoid retraining later
+		toc_base = time()
+		@info "Total training time: $(round(toc_base - tic_base, digits=4)) s"
+		params = Flux.params(enc, dec)
+		@save "params.bson" params
+		# return nothing, this mutates the parameters of enc and dec!
 	end
-	# return nothing, this mutates the parameters of enc and dec!
+	
 end
 
 # ╔═╡ c86a877c-90b9-11eb-31d8-bbcb71e4fa66
-train!(encoder, decoder, batches, nepochs=100)
+train!(encoder, decoder, batches, nepochs=20, force_retrain=false)
 
 # ╔═╡ 17c5ddda-90ba-11eb-1fce-93b8306264fb
 md"""
@@ -240,9 +308,6 @@ We will use the model and variational networks to visualize the latent represent
 
 We will use a variatety of qualitative techniques to get a sense for our model by generating distributions over our data, sampling from them, and interpolating in the latent space.
 """
-
-# ╔═╡ 0a761dc4-90bb-11eb-1f6c-fba559ed5f66
-# using Plots ##
 
 # ╔═╡ 1201bfee-90bb-11eb-23e5-af9a61f64679
 md"""
@@ -255,17 +320,18 @@ md"""
 5. Display a single colourful scatterplot
 """
 
-# ╔═╡ d908c2f4-90bb-11eb-11b1-b340f58a1584
-
-
 # ╔═╡ d9b3c078-90bb-11eb-1c41-c784851a9148
-
-
-# ╔═╡ da5527ee-90bb-11eb-190a-897e2d743368
-
-
-# ╔═╡ db18e7e2-90bb-11eb-18e5-87e4f094123d
-
+begin
+	μ, logσ = wrap_to_gaussian_par(encoder(first(batches)))
+	label = Flux.Data.MNIST.labels(:train)[1:BS]
+	plot()
+	for i in 0:9
+		plot!(μ[1,label.==i],μ[2,label.==i],seriestype = :scatter,label=i)
+	end
+	title!("2D means of VAE")
+	xlabel!("VAE1")
+	ylabel!("VAE2")
+end
 
 # ╔═╡ dcedbba4-90bb-11eb-2652-bf6448095107
 md"""
@@ -279,17 +345,34 @@ md"""
 6. Display all plots in a single 10 x 4 grid. Each row corresponding to a sample $z$. Do not include any axis labels.
 """
 
+# ╔═╡ ab1d0b80-9358-11eb-256c-6fe6bba786dc
+manual_bernoulli(μ) = convert(Int64, rand() < μ)
+
+# ╔═╡ 79804c6c-929b-11eb-1ae5-3dbcf295195b
+wrap_to_image(array) = Gray.(reshape(array, (28, 28, size(array)[2])))
+
+# ╔═╡ 632b10ae-929c-11eb-1de0-e1e6330c5277
+wrap_to_μ(logit_means) = 2 .- exp.(log1pexp.(-log1pexp.(logit_means)))
+
 # ╔═╡ 805a265e-90be-11eb-2c34-1dd0cd1a968c
-
-
-# ╔═╡ 80d6b61a-90be-11eb-2fae-638cdaaf7abd
-
-
-# ╔═╡ 815d4720-90be-11eb-0fb2-2bb764a45824
-
-
-# ╔═╡ 820e9994-90be-11eb-23a1-0f52d3cf7c0f
-
+begin
+	z = reshape(randn(20),(2,10))
+	log_mean = decoder(z)
+	μs = wrap_to_μ(log_mean)
+	sample1 = wrap_to_image(manual_bernoulli.(μs))
+	sample2 = wrap_to_image(manual_bernoulli.(μs))
+	sample3 = wrap_to_image(manual_bernoulli.(μs))
+	imgs = wrap_to_image(μs)
+	imshow = []
+	for i in 1:10
+		push!(imshow, plot(imgs[:,:,i], axis=nothing))
+		push!(imshow, plot(sample1[:,:,i], axis=nothing))
+		push!(imshow, plot(sample2[:,:,i], axis=nothing))
+		push!(imshow, plot(sample3[:,:,i], axis=nothing))
+	end
+	display(plot(imshow..., layout=((10,4)), size=(700,700)))
+	current();
+end
 
 # ╔═╡ 82b0a368-90be-11eb-0ddb-310f332a83f0
 md"""
@@ -304,10 +387,30 @@ md"""
 """
 
 # ╔═╡ f27bdffa-90c0-11eb-0f71-6d572f799290
-
-
-# ╔═╡ 00b7f55e-90c1-11eb-119e-f577037923a9
-
+begin
+	sample_digits = binarized_MNIST[:,rand(1:size(binarized_MNIST)[2], 4)]
+	μ3, logσ3 = wrap_to_gaussian_par(encoder(sample_digits))
+	σ3 = exp.(logσ3)
+	samples_latent = μ3 .+ σ3 .* randn(2, 4)
+	# 1st: (1,5) 2nd: (2,6) 3rd: (3,7) 4th: (4,8)
+	samples_latent = hcat(samples_latent, μ3 .+ σ3 .* randn(2, 4))
+	log_mean3 = decoder(samples_latent)
+	μs3 = wrap_to_μ(log_mean3)
+	recon = manual_bernoulli.(μs3)
+	img_x = wrap_to_image(sample_digits)
+	img_μs3 = wrap_to_image(μs3)
+	img_recon = wrap_to_image(recon)
+	imshow3 = []
+	for i in 1:4
+		push!(imshow3, plot(img_x[:,:,i],title="$i-th digit", axis=nothing))
+		push!(imshow3, plot(img_μs3[:,:,i], title="μ 1", axis=nothing))
+		push!(imshow3, plot(img_recon[:,:,i], title="recon 1", axis=nothing))
+		push!(imshow3, plot(img_μs3[:,:,i + 4], title="μ 2", axis=nothing))
+		push!(imshow3, plot(img_recon[:,:,i + 4], title="recon 2", axis=nothing))
+	end
+	display(plot(imshow3..., layout=((4,5))))
+	current();
+end
 
 # ╔═╡ 02181adc-90c1-11eb-29d7-736dce72a0ac
 md"""
@@ -319,17 +422,47 @@ md"""
 4. Display a single `1400x1400` pixel greyscale image corresponding to the learned latent space.
 """
 
+# ╔═╡ 1dee7a66-92c0-11eb-1222-0fa933c03bc1
+function manifold_cat(μz_img)
+	img_whole = nothing
+	for row in 1:50
+		row_cur = nothing
+		for column in 1:50
+			img_cur = μz_img[:,:,(row-1) * 50 + column]
+			if row_cur == nothing
+				row_cur = img_cur
+			else
+				row_cur = hcat(row_cur, img_cur)
+			end
+		end
+		if img_whole == nothing
+			img_whole = row_cur
+		else
+			img_whole = vcat(img_whole, row_cur)
+		end
+	end
+	return img_whole
+end
+
 # ╔═╡ 3a0e1d5a-90c2-11eb-16a7-8f9de1ea09e4
+begin
+	vmax = 2
+	vmin = -vmax
+	res = 2 * vmax / (50 - 1)
+	
+	z_lattice = reshape([[i; j] for i in vmin:res:vmax, j in vmax:-res:vmin], 2500)
+	z_input = reshape([(z_lattice...)...], (2,2500)) # 2 × 2500
+	log_μz = decoder(z_input)
+	μz = wrap_to_μ(log_μz)
+	img_μz = wrap_to_image(μz)
+	img_manifold = manifold_cat(img_μz)
+	plot(img_manifold, title="manifold", axis=nothing, size=(700,700))
+end
 
-
-# ╔═╡ 3a9a2624-90c2-11eb-1986-17b80a2a58c5
-
-
-# ╔═╡ 3b6f8e5e-90c2-11eb-3da4-a5fd3048ab63
-
-
-# ╔═╡ 3cb18062-90c2-11eb-3622-1f29d445e0ba
-
+# ╔═╡ 95263d58-92c0-11eb-37d8-11a9fb0be272
+md"""
+The manifold is displayed in a standard Cartesian coordinates, i.e., the top-left corner corresponds to (-2, 2), the bottom-right corner corrsponds to (2, -2).
+"""
 
 # ╔═╡ Cell order:
 # ╟─9e368304-8c16-11eb-0417-c3792a4cd8ce
@@ -345,6 +478,7 @@ md"""
 # ╠═c70eaa72-90ad-11eb-3600-016807d53697
 # ╠═e12a5b5e-90ad-11eb-25a8-43c9aff1e0db
 # ╟─3b07d20a-8e88-11eb-1956-ddbaaf178cb3
+# ╠═ec53e34c-9139-11eb-2cef-eb640a77b9b4
 # ╠═ce50c994-90af-11eb-3fc1-a3eea9cda1a2
 # ╠═3b386e56-90ac-11eb-31c2-29ba365a6967
 # ╠═d7415d20-90af-11eb-266b-b3ea86750c98
@@ -352,28 +486,26 @@ md"""
 # ╠═0afbe054-90b0-11eb-0233-6faede537bc4
 # ╟─b8a20c8c-8ea4-11eb-0d48-a37047ab70c5
 # ╠═615e59c6-90b6-11eb-2598-d32538e14e8f
+# ╠═1859c670-9133-11eb-275b-cfdb9b3affae
+# ╠═3eda2d1a-9202-11eb-2909-23a577d74f6f
 # ╠═ccf226b8-90b6-11eb-15a2-d30c9e27aebb
 # ╠═f00b5444-90b6-11eb-1e0d-5d034735ec0e
 # ╟─70ccd9a4-90b7-11eb-1fb2-3f7aff4073a0
+# ╠═76f893fe-928b-11eb-0034-8586ba4e1918
 # ╠═5efb0baa-90b8-11eb-304f-7dbb8d5c0ba6
 # ╠═c86a877c-90b9-11eb-31d8-bbcb71e4fa66
 # ╟─17c5ddda-90ba-11eb-1fce-93b8306264fb
 # ╠═0a761dc4-90bb-11eb-1f6c-fba559ed5f66
 # ╟─1201bfee-90bb-11eb-23e5-af9a61f64679
-# ╠═d908c2f4-90bb-11eb-11b1-b340f58a1584
 # ╠═d9b3c078-90bb-11eb-1c41-c784851a9148
-# ╠═da5527ee-90bb-11eb-190a-897e2d743368
-# ╠═db18e7e2-90bb-11eb-18e5-87e4f094123d
 # ╟─dcedbba4-90bb-11eb-2652-bf6448095107
+# ╠═ab1d0b80-9358-11eb-256c-6fe6bba786dc
+# ╠═79804c6c-929b-11eb-1ae5-3dbcf295195b
+# ╠═632b10ae-929c-11eb-1de0-e1e6330c5277
 # ╠═805a265e-90be-11eb-2c34-1dd0cd1a968c
-# ╠═80d6b61a-90be-11eb-2fae-638cdaaf7abd
-# ╠═815d4720-90be-11eb-0fb2-2bb764a45824
-# ╠═820e9994-90be-11eb-23a1-0f52d3cf7c0f
 # ╟─82b0a368-90be-11eb-0ddb-310f332a83f0
 # ╠═f27bdffa-90c0-11eb-0f71-6d572f799290
-# ╠═00b7f55e-90c1-11eb-119e-f577037923a9
 # ╟─02181adc-90c1-11eb-29d7-736dce72a0ac
+# ╠═1dee7a66-92c0-11eb-1222-0fa933c03bc1
 # ╠═3a0e1d5a-90c2-11eb-16a7-8f9de1ea09e4
-# ╠═3a9a2624-90c2-11eb-1986-17b80a2a58c5
-# ╠═3b6f8e5e-90c2-11eb-3da4-a5fd3048ab63
-# ╠═3cb18062-90c2-11eb-3622-1f29d445e0ba
+# ╟─95263d58-92c0-11eb-37d8-11a9fb0be272
